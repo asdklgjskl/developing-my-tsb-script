@@ -1,1 +1,1707 @@
-404: Not Found
+-- ============================================
+-- 🎃 HALLOWEEN FARM HUB v4 FULL
+-- Auto Farm + Kill + Buy + Bot Kill + Roll
+-- ============================================
+-- Player: megasfon200
+-- Shop: 562.0, 445.7, -440.3
+-- Buy Mouse: 954, 494
+-- Emote Spin: PlayerGui.Emotes.ImageLabel.Spin
+-- ============================================
+
+-- ============================================
+-- LOAD WINDUI
+-- ============================================
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+
+-- ============================================
+-- SERVICES
+-- ============================================
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local VIM = game:GetService("VirtualInputManager")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+-- ============================================
+-- DATA / STATS (Persistent)
+-- ============================================
+local dataFolder = "HalloweenFarmData"
+local dataFile = dataFolder .. "/data.json"
+
+local defaultData = {
+    totalTime = 0,
+    totalCandy = 0,
+    totalKills = 0,
+    totalDoors = 0,
+    totalAuras = 0,
+    launches = 0
+}
+
+local function loadData()
+    if not isfolder(dataFolder) then
+        makefolder(dataFolder)
+    end
+    if isfile(dataFile) then
+        local ok, d = pcall(function()
+            return HttpService:JSONDecode(readfile(dataFile))
+        end)
+        if ok and d then
+            return d
+        end
+    end
+    return defaultData
+end
+
+local function saveData()
+    pcall(function()
+        writefile(dataFile, HttpService:JSONEncode(stats))
+    end)
+end
+
+local stats = loadData()
+stats.launches = (stats.launches or 0) + 1
+saveData()
+
+local sessionStart = tick()
+local sessionCandy = 0
+local sessionKills = 0
+local sessionDoors = 0
+local sessionAuras = 0
+
+-- ============================================
+-- CANDY TRACKING (только собранные, не дроп)
+-- ============================================
+local pendingCandy = {}
+local candyFolder = workspace:FindFirstChild("HalloweenCandy")
+
+if candyFolder then
+    candyFolder.ChildAdded:Connect(function(c)
+        pendingCandy[c] = true
+    end)
+    candyFolder.ChildRemoved:Connect(function(c)
+        if pendingCandy[c] then
+            pendingCandy[c] = nil
+            sessionCandy = sessionCandy + 1
+            stats.totalCandy = stats.totalCandy + 1
+            saveData()
+        end
+    end)
+end
+
+-- Kills tracking через атрибут
+player:GetAttributeChangedSignal("Kills"):Connect(function()
+    sessionKills = sessionKills + 1
+    stats.totalKills = stats.totalKills + 1
+    saveData()
+end)
+
+-- ============================================
+-- GLOBAL VARIABLES
+-- ============================================
+
+-- Farm
+local farmEnabled = false
+
+-- Zombie Kill
+local killEnabled = false
+local targetBosses = true
+
+-- Bot Kill
+local botKillEnabled = false
+local botKillPos = nil
+local botImmunityTime = 2.5
+local botSeenTimes = {}
+local botKillCount = 0
+local botAttackRadius = 60
+
+-- Roll Emotes
+local rollEveryKills = 50
+local rollMouseX = 0
+local rollMouseY = 0
+local rollRemote = nil
+
+-- Buy
+local buyEnabled = false
+local buyLockCamera = false
+local buyHoldTime = 2.0
+local buyCooldown = 10
+
+-- Player
+local loopWsEnabled = false
+local loopJpEnabled = false
+local walkSpeedVal = 16
+local jumpPowerVal = 50
+
+-- Teleport
+local savedTpPos = nil
+local constantTpEnabled = false
+local constantTpPos = nil
+local tpOnRespawn = false
+local respawnTpPos = nil
+
+-- Extras
+local noclipEnabled = false
+
+-- Combat
+local clickDelay = 0.12
+local skillDelay = 0.8
+
+-- Fixed positions
+local shopPos = Vector3.new(562.0, 445.7, -440.3)
+local buyMouseX = 954
+local buyMouseY = 494
+
+-- Zombie blacklist (NPC, не убивать)
+local zombieBlacklist = {
+    ["Shopkeeper"] = true,
+    ["Giver"] = true,
+}
+
+-- ============================================
+-- HELPER FUNCTIONS
+-- ============================================
+local function getChar()
+    return player.Character
+end
+
+local function getRoot()
+    local c = getChar()
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+local function getHum()
+    local c = getChar()
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+local function isBusy()
+    local c = getChar()
+    if not c then return true end
+    local root = c:FindFirstChild("HumanoidRootPart")
+    if not root then return true end
+    if root:FindFirstChild("RootAnchor") then return true end
+    if root:FindFirstChild("NoRotate") then return true end
+    return false
+end
+
+local function tpTo(pos)
+    local root = getRoot()
+    if root then
+        root.CFrame = CFrame.new(pos)
+    end
+end
+
+local function pressKey(key)
+    VIM:SendKeyEvent(true, key, false, game)
+    task.wait(0.05)
+    VIM:SendKeyEvent(false, key, false, game)
+end
+
+local function clickMouse(x, y)
+    VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+    task.wait(clickDelay)
+    VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+end
+
+-- ============================================
+-- ROLL EMOTES SYSTEM
+-- ============================================
+local function findSpinButton()
+    local pg = player:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+    local emotes = pg:FindFirstChild("Emotes")
+    if not emotes then return nil end
+    local img = emotes:FindFirstChild("ImageLabel")
+    if not img then return nil end
+    local spin = img:FindFirstChild("Spin")
+    if not spin then return nil end
+    return spin
+end
+
+local function findRollRemote()
+    -- Ищем Remote для ролла в ReplicatedStorage
+    for _, v in ReplicatedStorage:GetDescendants() do
+        local n = v.Name:lower()
+        if (v:IsA("RemoteEvent") or v:IsA("RemoteFunction")) then
+            if n:find("roll") or n:find("emote") or n:find("spin") or n:find("gacha") then
+                return v
+            end
+        end
+    end
+    -- Ищем в других местах
+    for _, v in game:GetDescendants() do
+        local n = v.Name:lower()
+        if (v:IsA("RemoteEvent") or v:IsA("RemoteFunction")) then
+            if (n:find("roll") or n:find("emote") or n:find("spin"))
+               and not n:find("replication")
+               and not n:find("catalogue") then
+                return v
+            end
+        end
+    end
+    return nil
+end
+
+local function doRoll()
+    -- Способ 1: firesignal на Spin кнопку (самый надёжный)
+    local spinBtn = findSpinButton()
+    if spinBtn and firesignal then
+        pcall(function()
+            firesignal(spinBtn.MouseButton1Click)
+        end)
+        print("🎲 Ролл через firesignal(Spin.MouseButton1Click)")
+        WindUI:Notify({Title = "🎲 Ролл эмоций!", Desc = "firesignal на Spin кнопку", Duration = 3})
+        return
+    end
+
+    -- Способ 2: Remote
+    if not rollRemote then
+        rollRemote = findRollRemote()
+    end
+    if rollRemote then
+        pcall(function()
+            if rollRemote:IsA("RemoteEvent") then
+                rollRemote:FireServer()
+            elseif rollRemote:IsA("RemoteFunction") then
+                rollRemote:InvokeServer()
+            end
+        end)
+        print("🎲 Ролл через Remote:", rollRemote.Name)
+        WindUI:Notify({Title = "🎲 Ролл эмоций!", Desc = "Remote: " .. rollRemote.Name, Duration = 3})
+        return
+    end
+
+    -- Способ 3: Клик по координатам Spin кнопки
+    if spinBtn then
+        local pos = spinBtn.AbsolutePosition
+        local size = spinBtn.AbsoluteSize
+        local cx = pos.X + size.X / 2
+        local cy = pos.Y + size.Y / 2
+        VIM:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
+        task.wait(0.15)
+        VIM:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
+        print("🎲 Ролл через клик по Spin:", cx, cy)
+        WindUI:Notify({Title = "🎲 Ролл эмоций!", Desc = "Клик по Spin кнопке", Duration = 3})
+        return
+    end
+
+    -- Способ 4: Ручные координаты мыши
+    if rollMouseX > 0 and rollMouseY > 0 then
+        VIM:SendMouseButtonEvent(rollMouseX, rollMouseY, 0, true, game, 0)
+        task.wait(0.15)
+        VIM:SendMouseButtonEvent(rollMouseX, rollMouseY, 0, false, game, 0)
+        print("🎲 Ролл через ручные координаты:", rollMouseX, rollMouseY)
+        WindUI:Notify({Title = "🎲 Ролл эмоций!", Desc = "Клик по координатам", Duration = 3})
+        return
+    end
+
+    print("⚠️ Не удалось сделать ролл — не найдена Spin кнопка и нет координат!")
+    WindUI:Notify({Title = "⚠️ Ролл не удался", Desc = "Не найдена кнопка Spin", Duration = 3})
+end
+
+local function checkRoll()
+    if botKillCount > 0 and botKillCount % rollEveryKills == 0 then
+        task.spawn(doRoll)
+    end
+end
+
+-- ============================================
+-- AUTO FARM: CANDY
+-- ============================================
+local function farmCandy()
+    local cf = workspace:FindFirstChild("HalloweenCandy")
+    if not cf then return end
+
+    local root = getRoot()
+    if not root or isBusy() then return end
+
+    for _, candy in cf:GetChildren() do
+        if not farmEnabled then break end
+
+        local rest = candy:GetAttribute("Rest")
+        local target = nil
+
+        if rest then
+            target = workspace:FindFirstChild(rest, true)
+        end
+
+        if target and target:IsA("BasePart") then
+            root.CFrame = target.CFrame + Vector3.new(0, 3, 0)
+            task.wait(0.3)
+        end
+    end
+end
+
+-- ============================================
+-- AUTO FARM: DOORS
+-- ============================================
+local function farmDoors()
+    local trees = workspace:FindFirstChild("HalloweenDoorTrees")
+    if not trees then return end
+
+    local root = getRoot()
+    if not root or isBusy() then return end
+
+    for _, tree in trees:GetChildren() do
+        if not farmEnabled then break end
+
+        for _, door in tree:GetChildren() do
+            if door.Name:find("DOOR") then
+                local frame = door:FindFirstChild("Frame")
+                if frame then
+                    local prompt = frame:FindFirstChild("TrickOrTreat")
+                    if prompt and prompt:IsA("ProximityPrompt") then
+                        -- ТП к двери
+                        root.CFrame = prompt.Parent.CFrame + Vector3.new(0, 2, 3)
+                        task.wait(0.5)
+
+                        -- Открываем дверь
+                        pcall(fireproximityprompt, prompt)
+                        sessionDoors = sessionDoors + 1
+                        stats.totalDoors = stats.totalDoors + 1
+                        saveData()
+
+                        -- Ждём спавн зомби
+                        task.wait(1.5)
+
+                        -- Если авто-килл зомби включён — убиваем
+                        if killEnabled then
+                            killNearbyZombies(40)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- ============================================
+-- AUTO KILL ZOMBIES
+-- ============================================
+local function isZombieTarget(model)
+    if not model:IsA("Model") then return false end
+    if not model:FindFirstChild("HumanoidRootPart") then return false end
+
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+
+    -- Исключаем игроков
+    for _, p in Players:GetPlayers() do
+        if p.Character == model then return false end
+    end
+
+    -- Исключаем NPC из чёрного списка
+    if zombieBlacklist[model.Name] then return false end
+
+    -- Только из Workspace.Live
+    local live = workspace:FindFirstChild("Live")
+    if not live or model.Parent ~= live then return false end
+
+    -- Фильтр боссов
+    if not targetBosses and model.Name:find("Dummy") then return false end
+
+    return true
+end
+
+function killNearbyZombies(maxDist)
+    maxDist = maxDist or 999
+    local live = workspace:FindFirstChild("Live")
+    if not live then return end
+
+    local root = getRoot()
+    if not root then return end
+
+    local targets = {}
+    for _, model in live:GetChildren() do
+        if isZombieTarget(model) then
+            local zRoot = model:FindFirstChild("HumanoidRootPart")
+            if zRoot then
+                local dist = (root.Position - zRoot.Position).Magnitude
+                if dist <= maxDist then
+                    table.insert(targets, {model = model, dist = dist})
+                end
+            end
+        end
+    end
+
+    table.sort(targets, function(a, b) return a.dist < b.dist end)
+
+    for _, t in targets do
+        if not killEnabled and not farmEnabled then break end
+        local h = t.model:FindFirstChildOfClass("Humanoid")
+        if h and h.Health > 0 and t.model.Parent then
+            attackZombie(t.model)
+            task.wait(0.3)
+        end
+    end
+end
+
+function attackZombie(zombie)
+    local root = getRoot()
+    local zRoot = zombie:FindFirstChild("HumanoidRootPart")
+    local hum = zombie:FindFirstChildOfClass("Humanoid")
+    if not root or not zRoot or not hum then return end
+
+    local cx = camera.ViewportSize.X / 2
+    local cy = camera.ViewportSize.Y / 2
+
+    local maxHits = 200
+    local hits = 0
+    local skillCycle = 0
+
+    while (killEnabled or farmEnabled) and hum and hum.Health > 0 and hits < maxHits do
+        if not zombie.Parent or not zRoot.Parent then break end
+
+        -- Камера на зомби
+        if zRoot.Parent then
+            camera.CFrame = CFrame.lookAt(
+                camera.CFrame.Position,
+                zRoot.Position + Vector3.new(0, 2, 0)
+            )
+        end
+
+        -- ТП к зомби
+        if zRoot.Parent and root.Parent then
+            root.CFrame = zRoot.CFrame * CFrame.new(2, 0, 5)
+        end
+
+        -- ЛКМ
+        clickMouse(cx, cy)
+        hits = hits + 1
+
+        -- Скиллы каждые 3 удара: 1, 2, 3
+        skillCycle = skillCycle + 1
+        if skillCycle >= 3 then
+            skillCycle = 0
+            local sk = math.random(1, 3)
+            local key = sk == 1 and Enum.KeyCode.One
+                     or sk == 2 and Enum.KeyCode.Two
+                     or Enum.KeyCode.Three
+            pressKey(key)
+            task.wait(skillDelay)
+        end
+
+        task.wait(clickDelay)
+    end
+end
+
+local function killLoop()
+    while killEnabled do
+        local root = getRoot()
+        local hum = getHum()
+        if root and hum and hum.Health > 0 then
+            killNearbyZombies(200)
+        end
+        task.wait(1.5)
+    end
+end
+
+-- ============================================
+-- BOT KILL SYSTEM
+-- ============================================
+local function isBotTarget(model)
+    if not model:IsA("Model") then return false end
+    if not model:FindFirstChild("HumanoidRootPart") then return false end
+
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+
+    -- Исключаем себя
+    if player.Character == model then return false end
+
+    -- Исключаем NPC из блэклиста
+    if zombieBlacklist[model.Name] then return false end
+
+    -- Исключаем зомби (они в Live и имеют специфичные имена)
+    if model.Name == "Halloween Zombie" then return false end
+    if model.Name == "Weakest Dummy" then return false end
+
+    return true
+end
+
+local function getBotTargets()
+    if not botKillPos then return {} end
+
+    local targets = {}
+
+    -- Ищем в workspace (боты как Character модели)
+    for _, model in workspace:GetChildren() do
+        if isBotTarget(model) then
+            local bRoot = model:FindFirstChild("HumanoidRootPart")
+            if bRoot then
+                local dist = (botKillPos - bRoot.Position).Magnitude
+                if dist <= botAttackRadius then
+                    table.insert(targets, {model = model, dist = dist})
+                end
+            end
+        end
+    end
+
+    -- Также ищем в workspace.Live
+    local live = workspace:FindFirstChild("Live")
+    if live then
+        for _, model in live:GetChildren() do
+            if isBotTarget(model) then
+                local bRoot = model:FindFirstChild("HumanoidRootPart")
+                if bRoot then
+                    local dist = (botKillPos - bRoot.Position).Magnitude
+                    if dist <= botAttackRadius then
+                        table.insert(targets, {model = model, dist = dist})
+                    end
+                end
+            end
+        end
+    end
+
+    table.sort(targets, function(a, b) return a.dist < b.dist end)
+    return targets
+end
+
+local function attackBot(bot)
+    local root = getRoot()
+    local bRoot = bot:FindFirstChild("HumanoidRootPart")
+    local hum = bot:FindFirstChildOfClass("Humanoid")
+    if not root or not bRoot or not hum then return end
+
+    local cx = camera.ViewportSize.X / 2
+    local cy = camera.ViewportSize.Y / 2
+
+    local maxHits = 300
+    local hits = 0
+    local skillCycle = 0
+
+    while botKillEnabled and hum and hum.Health > 0 and hits < maxHits do
+        if not bot.Parent or not bRoot.Parent then break end
+
+        -- Камера на бота
+        if bRoot.Parent then
+            camera.CFrame = CFrame.lookAt(
+                camera.CFrame.Position,
+                bRoot.Position + Vector3.new(0, 2, 0)
+            )
+        end
+
+        -- ТП к боту
+        if bRoot.Parent and root.Parent then
+            root.CFrame = bRoot.CFrame * CFrame.new(2, 0, 5)
+        end
+
+        -- Определяем добивание (HP < 30%)
+        local isFinishing = hum.Health < (hum.MaxHealth * 0.3)
+
+        -- ЛКМ
+        clickMouse(cx, cy)
+        hits = hits + 1
+
+        -- Скиллы каждые 4 удара
+        skillCycle = skillCycle + 1
+        if skillCycle >= 4 then
+            skillCycle = 0
+
+            if isFinishing then
+                -- ДОБИВАНИЕ: только 1, 3, 4 (БЕЗ 2 — долгая анимация!)
+                local sk = math.random(1, 3)
+                local key = sk == 1 and Enum.KeyCode.One
+                         or sk == 2 and Enum.KeyCode.Three
+                         or Enum.KeyCode.Four
+                pressKey(key)
+            else
+                -- ОБЫЧНАЯ АТАКА: 1, 2, 3, 4
+                local sk = math.random(1, 4)
+                local key = sk == 1 and Enum.KeyCode.One
+                         or sk == 2 and Enum.KeyCode.Two
+                         or sk == 3 and Enum.KeyCode.Three
+                         or Enum.KeyCode.Four
+                pressKey(key)
+            end
+            task.wait(skillDelay)
+        end
+
+        task.wait(clickDelay)
+    end
+
+    -- Бот убит — считаем
+    if hum and hum.Health <= 0 then
+        botKillCount = botKillCount + 1
+        print("💀 Бот убит! Всего:", botKillCount)
+        checkRoll()
+    end
+end
+
+local function botKillLoop()
+    while botKillEnabled do
+        local root = getRoot()
+        local hum = getHum()
+
+        if not root or not hum or hum.Health <= 0 then
+            task.wait(1)
+            continue
+        end
+
+        -- Держим ТП на позицию ботов
+        if botKillPos then
+            root.CFrame = CFrame.new(botKillPos + Vector3.new(0, 3, 0))
+        end
+
+        -- Ищем ботов
+        local targets = getBotTargets()
+
+        for _, t in targets do
+            if not botKillEnabled then break end
+
+            local model = t.model
+            local bRoot = model:FindFirstChild("HumanoidRootPart")
+            local bHum = model:FindFirstChildOfClass("Humanoid")
+            if not bRoot or not bHum or bHum.Health <= 0 then continue end
+
+            -- Проверяем бессмертие (2.5 сек после первого обнаружения)
+            if not botSeenTimes[model] then
+                botSeenTimes[model] = tick()
+                print("👁️ Бот обнаружен:", model.Name, "| Ждём", botImmunityTime, "сек бессмертия...")
+            end
+
+            local timeSinceSeen = tick() - botSeenTimes[model]
+            if timeSinceSeen < botImmunityTime then
+                -- Ещё бессмертие — ждём оставшееся время
+                local remaining = botImmunityTime - timeSinceSeen
+                print("⏳ Бессмертие:", string.format("%.1f", remaining), "сек")
+                task.wait(remaining)
+            end
+
+            -- Проверяем снова что жив после ожидания
+            if bHum.Health > 0 and model.Parent then
+                attackBot(model)
+            end
+
+            -- Чистим мёртвых из таблицы
+            if not model.Parent or bHum.Health <= 0 then
+                botSeenTimes[model] = nil
+            end
+        end
+
+        -- Чистим таблицу от удалённых моделей
+        for model, _ in botSeenTimes do
+            if not model.Parent then
+                botSeenTimes[model] = nil
+            end
+        end
+
+        task.wait(0.8)
+    end
+end
+
+-- ============================================
+-- AUTO BUY AURAS
+-- ============================================
+local function tryBuyAura()
+    local root = getRoot()
+    local hum = getHum()
+    if not root or not hum or hum.Health <= 0 then return end
+
+    local candy = player:GetAttribute("Candy") or 0
+    if candy < 500 then return end
+
+    -- Сохраняем позицию и камеру
+    local oldPos = root.CFrame
+    local oldCam = camera.CFrame
+
+    -- ТП к магазину
+    root.CFrame = CFrame.new(shopPos)
+    task.wait(0.5)
+
+    -- Лочим камеру если нужно
+    if buyLockCamera then
+        camera.CFrame = CFrame.new(shopPos + Vector3.new(0, 5, 10), shopPos)
+    end
+
+    -- Двигаем мышь на кнопку покупки
+    VIM:SendMouseMoveEvent(buyMouseX, buyMouseY, game)
+    task.wait(0.3)
+
+    -- Зажимаем ЛКМ
+    VIM:SendMouseButtonEvent(buyMouseX, buyMouseY, 0, true, game, 0)
+    task.wait(buyHoldTime)
+    VIM:SendMouseButtonEvent(buyMouseX, buyMouseY, 0, false, game, 0)
+
+    task.wait(0.5)
+
+    -- Возвращаемся
+    root.CFrame = oldPos
+    if buyLockCamera then
+        camera.CFrame = oldCam
+    end
+
+    sessionAuras = sessionAuras + 1
+    stats.totalAuras = stats.totalAuras + 1
+    saveData()
+end
+
+local function buyLoop()
+    while buyEnabled do
+        pcall(tryBuyAura)
+        task.wait(buyCooldown)
+    end
+end
+
+-- ============================================
+-- WINDUI WINDOW
+-- ============================================
+local Window = WindUI:CreateWindow({
+    Title = "🎃 Halloween Farm Hub v4",
+    Icon = "ghost",
+    Size = UDim2.fromOffset(600, 480),
+    Transparent = false,
+    Theme = "Dark",
+})
+
+-- ============================================
+-- TAB: HOME (первый = открывается сразу)
+-- ============================================
+local homeTab = Window:Tab({
+    Title = "Home",
+    Icon = "home",
+})
+
+local homeSection = homeTab:Section({
+    Title = "📊 Статистика",
+})
+
+local statAllTime = homeSection:Paragraph({
+    Title = "All-Time",
+    Desc = "Загрузка...",
+})
+
+local statSession = homeSection:Paragraph({
+    Title = "Session",
+    Desc = "Загрузка...",
+})
+
+local homeInfoSection = homeTab:Section({
+    Title = "ℹ️ Информация",
+})
+
+homeInfoSection:Paragraph({
+    Title = "Версия",
+    Desc = "v4 FULL — Farm + Kill + Buy + Bot Kill + Roll",
+})
+
+homeInfoSection:Paragraph({
+    Title = "Игрок",
+    Desc = "megasfon200",
+})
+
+homeInfoSection:Paragraph({
+    Title = "Функции",
+    Desc = "🍬 Candy Farm | 🚪 Door Farm | 🗡️ Zombie Kill | 🤖 Bot Kill | 🛒 Auto Buy | 🎲 Roll Emotes | 📍 Teleport | ⚡ Speed | 🔧 Extras",
+})
+
+-- ============================================
+-- TAB: AUTO FARM
+-- ============================================
+local farmTab = Window:Tab({
+    Title = "Auto Farm",
+    Icon = "candy",
+})
+
+local farmSection = farmTab:Section({
+    Title = "🍬 Фарм конфет и дверей",
+})
+
+farmSection:Toggle({
+    Title = "Auto Farm Candy + Doors",
+    Desc = "Собирает конфеты из HalloweenCandy и открывает двери TrickOrTreat",
+    Default = false,
+    Callback = function(v)
+        farmEnabled = v
+        if v then
+            task.spawn(function()
+                while farmEnabled do
+                    pcall(farmCandy)
+                    task.wait(0.5)
+                    pcall(farmDoors)
+                    task.wait(1)
+                end
+            end)
+        end
+    end
+})
+
+farmSection:Space()
+
+-- ============================================
+-- SECTION: ZOMBIE KILL (внутри Auto Farm)
+-- ============================================
+local killSection = farmTab:Section({
+    Title = "🗡️ Авто-килл зомби",
+})
+
+killSection:Toggle({
+    Title = "Auto Kill Zombies",
+    Desc = "ТП к зомби в workspace.Live, бьёт ЛКМ + скиллы 1,2,3",
+    Default = false,
+    Callback = function(v)
+        killEnabled = v
+        if v then
+            task.spawn(killLoop)
+        end
+    end
+})
+
+killSection:Toggle({
+    Title = "Target Bosses (Dummy)",
+    Desc = "Убивать Weakest Dummy (HP 100) в workspace.Live",
+    Default = true,
+    Callback = function(v)
+        targetBosses = v
+    end
+})
+
+killSection:Slider({
+    Title = "Click Delay",
+    Desc = "Задержка между ударами ЛКМ (сек)",
+    Min = 0.05,
+    Max = 0.5,
+    Default = 0.12,
+    Round = 2,
+    Callback = function(v)
+        clickDelay = v
+    end
+})
+
+killSection:Slider({
+    Title = "Skill Delay",
+    Desc = "Задержка после использования скилла (сек)",
+    Min = 0.3,
+    Max = 3,
+    Default = 0.8,
+    Round = 1,
+    Callback = function(v)
+        skillDelay = v
+    end
+})
+
+-- ============================================
+-- TAB: BOT KILL
+-- ============================================
+local botTab = Window:Tab({
+    Title = "Bot Kill",
+    Icon = "crosshair",
+})
+
+local botInfoSection = botTab:Section({
+    Title = "📖 Инструкция",
+})
+
+botInfoSection:Paragraph({
+    Title = "Как использовать",
+    Desc = "1. Введи координаты где стоят боты (или нажми Save Current Pos)\n2. Включи галочку ЗАПУСК\n3. Скрипт ТП к позиции, ждёт 2.5с бессмертия, бьёт ЛКМ + 1,2,3,4\n4. Добивание (HP<30%): только 1,3,4 (без 2 — долгая анимация)\n5. Каждые 50 киллов — авто-ролл эмоций",
+})
+
+local botCoordSection = botTab:Section({
+    Title = "📍 Координаты ботов",
+})
+
+botCoordSection:Input({
+    Title = "Координаты ботов (x, y, z)",
+    Desc = "Позиция где спавнятся боты на твоём ПК",
+    Placeholder = "100.0, 440.0, -30.0",
+    Callback = function(text)
+        local x, y, z = text:match("([%d%.%-]+)%s*,%s*([%d%.%-]+)%s*,%s*([%d%.%-]+)")
+        if x and y and z then
+            botKillPos = Vector3.new(tonumber(x), tonumber(y), tonumber(z))
+            WindUI:Notify({
+                Title = "✅ Координаты ботов заданы",
+                Desc = string.format("X: %s, Y: %s, Z: %s", x, y, z),
+                Duration = 3,
+            })
+        else
+            WindUI:Notify({
+                Title = "❌ Ошибка формата",
+                Desc = "Используй формат: x, y, z (например: 100.0, 440.0, -30.0)",
+                Duration = 3,
+            })
+        end
+    end
+})
+
+botCoordSection:Button({
+    Title = "Save Current Pos",
+    Desc = "Сохранить текущую позицию персонажа как координаты ботов",
+    Callback = function()
+        local r = getRoot()
+        if r then
+            botKillPos = r.Position
+            local s = string.format("%.1f, %.1f, %.1f", r.Position.X, r.Position.Y, r.Position.Z)
+            WindUI:Notify({
+                Title = "✅ Позиция ботов сохранена",
+                Desc = s,
+                Duration = 3,
+            })
+        else
+            WindUI:Notify({
+                Title = "❌ Нет персонажа",
+                Desc = "Подожди респавна",
+                Duration = 2,
+            })
+        end
+    end
+})
+
+botCoordSection:Button({
+    Title = "Copy Bot Coords",
+    Desc = "Скопировать текущие координаты ботов в буфер",
+    Callback = function()
+        if botKillPos then
+            local s = string.format("%.1f, %.1f, %.1f", botKillPos.X, botKillPos.Y, botKillPos.Z)
+            if setclipboard then setclipboard(s) end
+            WindUI:Notify({Title = "📋 Скопировано", Desc = s, Duration = 2})
+        else
+            WindUI:Notify({Title = "⚠️ Нет координат", Desc = "Сначала задай", Duration = 2})
+        end
+    end
+})
+
+local botMainSection = botTab:Section({
+    Title = "🔴 Управление",
+})
+
+botMainSection:Toggle({
+    Title = "🔴 ЗАПУСК Bot Kill",
+    Desc = "ТП к ботам и автоматическое убийство (ЛКМ + скиллы 1,2,3,4)",
+    Default = false,
+    Callback = function(v)
+        botKillEnabled = v
+        if v then
+            if not botKillPos then
+                WindUI:Notify({
+                    Title = "⚠️ Нет координат!",
+                    Desc = "Сначала задай координаты ботов",
+                    Duration = 3,
+                })
+                botKillEnabled = false
+                return
+            end
+            botSeenTimes = {}
+            task.spawn(botKillLoop)
+            WindUI:Notify({
+                Title = "🤖 Bot Kill ВКЛ",
+                Desc = "Ищем ботов рядом с координатами...",
+                Duration = 3,
+            })
+        else
+            botSeenTimes = {}
+            WindUI:Notify({
+                Title = "🤖 Bot Kill ВЫКЛ",
+                Desc = "Остановлено",
+                Duration = 2,
+            })
+        end
+    end
+})
+
+botMainSection:Slider({
+    Title = "Immunity Time (сек)",
+    Desc = "Сколько ждать после спавна бота (бессмертие)",
+    Min = 1,
+    Max = 5,
+    Default = 2.5,
+    Round = 1,
+    Callback = function(v)
+        botImmunityTime = v
+    end
+})
+
+botMainSection:Slider({
+    Title = "Attack Radius",
+    Desc = "Радиус поиска ботов от заданных координат",
+    Min = 20,
+    Max = 150,
+    Default = 60,
+    Round = 0,
+    Callback = function(v)
+        botAttackRadius = v
+    end
+})
+
+botMainSection:Slider({
+    Title = "Click Delay",
+    Desc = "Задержка между ударами (общая с зомби)",
+    Min = 0.05,
+    Max = 0.5,
+    Default = 0.12,
+    Round = 2,
+    Callback = function(v)
+        clickDelay = v
+    end
+})
+
+botMainSection:Slider({
+    Title = "Skill Delay",
+    Desc = "Задержка после скилла (общая с зомби)",
+    Min = 0.3,
+    Max = 3,
+    Default = 0.8,
+    Round = 1,
+    Callback = function(v)
+        skillDelay = v
+    end
+})
+
+-- ============================================
+-- SECTION: BOT STATS
+-- ============================================
+local botStatsSection = botTab:Section({
+    Title = "📈 Статистика ботов",
+})
+
+local botCountPara = botStatsSection:Paragraph({
+    Title = "Боты убито",
+    Desc = "0 | Следующий ролл через: 50 киллов",
+})
+
+local botStatusPara = botStatsSection:Paragraph({
+    Title = "Статус",
+    Desc = "⏸ Остановлен",
+})
+
+-- ============================================
+-- SECTION: ROLL EMOTES
+-- ============================================
+local rollSection = botTab:Section({
+    Title = "🎲 Ролл эмоций",
+})
+
+rollSection:Paragraph({
+    Title = "Авто-ролл",
+    Desc = "Автоматически крутит эмоции каждые N киллов ботов через PlayerGui.Emotes.ImageLabel.Spin",
+})
+
+rollSection:Slider({
+    Title = "Roll Every N Kills",
+    Desc = "Каждые N киллов ботов делать ролл",
+    Min = 10,
+    Max = 200,
+    Default = 50,
+    Round = 0,
+    Callback = function(v)
+        rollEveryKills = v
+    end
+})
+
+rollSection:Input({
+    Title = "Roll Mouse X, Y (fallback)",
+    Desc = "Координаты кнопки Roll в GUI (если firesignal не сработает)",
+    Placeholder = "796, 172",
+    Callback = function(text)
+        local x, y = text:match("(%d+)%s*,%s*(%d+)")
+        if x and y then
+            rollMouseX = tonumber(x)
+            rollMouseY = tonumber(y)
+            WindUI:Notify({
+                Title = "✅ Roll координаты",
+                Desc = "X: " .. x .. ", Y: " .. y,
+                Duration = 2,
+            })
+        else
+            WindUI:Notify({
+                Title = "❌ Ошибка",
+                Desc = "Формат: x, y",
+                Duration = 2,
+            })
+        end
+    end
+})
+
+rollSection:Button({
+    Title = "Scan Roll Remote",
+    Desc = "Найти RemoteEvent/RemoteFunction для ролла в игре",
+    Callback = function()
+        local r = findRollRemote()
+        if r then
+            rollRemote = r
+            WindUI:Notify({
+                Title = "✅ Remote найден!",
+                Desc = r:GetFullName(),
+                Duration = 4,
+            })
+        else
+            WindUI:Notify({
+                Title = "❌ Remote не найден",
+                Desc = "Будет использован firesignal на Spin кнопку или координаты мыши",
+                Duration = 3,
+            })
+        end
+    end
+})
+
+rollSection:Button({
+    Title = "Test Spin Button",
+    Desc = "Проверить существует ли PlayerGui.Emotes.ImageLabel.Spin",
+    Callback = function()
+        local spin = findSpinButton()
+        if spin then
+            local pos = spin.AbsolutePosition
+            local size = spin.AbsoluteSize
+            WindUI:Notify({
+                Title = "✅ Spin кнопка найдена!",
+                Desc = string.format("Pos: %.0f, %.0f | Size: %.0f, %.0f", pos.X, pos.Y, size.X, size.Y),
+                Duration = 4,
+            })
+        else
+            WindUI:Notify({
+                Title = "❌ Spin не найден",
+                Desc = "Открой GUI эмоций в игре и попробуй снова",
+                Duration = 3,
+            })
+        end
+    end
+})
+
+rollSection:Button({
+    Title = "🎲 Roll Now",
+    Desc = "Сделать ролл эмоций прямо сейчас (тест)",
+    Callback = function()
+        task.spawn(doRoll)
+    end
+})
+
+-- ============================================
+-- TAB: TELEPORT
+-- ============================================
+local tpTab = Window:Tab({
+    Title = "Teleport",
+    Icon = "map-pin",
+})
+
+local tpSection = tpTab:Section({
+    Title = "📍 Телепорт",
+})
+
+tpSection:Button({
+    Title = "Save Position",
+    Desc = "Сохранить текущую позицию персонажа",
+    Callback = function()
+        local root = getRoot()
+        if root then
+            savedTpPos = root.Position
+            WindUI:Notify({
+                Title = "✅ Позиция сохранена",
+                Desc = string.format("%.1f, %.1f, %.1f", root.Position.X, root.Position.Y, root.Position.Z),
+                Duration = 2,
+            })
+        end
+    end
+})
+
+tpSection:Button({
+    Title = "Teleport to Saved",
+    Desc = "ТП на сохранённую позицию",
+    Callback = function()
+        if savedTpPos then
+            tpTo(savedTpPos)
+            WindUI:Notify({Title = "🚀 ТП!", Duration = 1})
+        else
+            WindUI:Notify({Title = "⚠️ Нет сохранённой позиции", Duration = 2})
+        end
+    end
+})
+
+tpSection:Button({
+    Title = "Copy Position",
+    Desc = "Скопировать текущие координаты в буфер обмена",
+    Callback = function()
+        local root = getRoot()
+        if root then
+            local p = root.Position
+            local s = string.format("%.1f, %.1f, %.1f", p.X, p.Y, p.Z)
+            if setclipboard then setclipboard(s) end
+            WindUI:Notify({
+                Title = "📋 Скопировано",
+                Desc = s,
+                Duration = 3,
+            })
+        end
+    end
+})
+
+tpSection:Input({
+    Title = "Paste & TP",
+    Desc = "Вставь координаты (x, y, z) и телепортируйся",
+    Placeholder = "562.0, 445.7, -440.3",
+    Callback = function(text)
+        local x, y, z = text:match("([%d%.%-]+)%s*,%s*([%d%.%-]+)%s*,%s*([%d%.%-]+)")
+        if x and y and z then
+            tpTo(Vector3.new(tonumber(x), tonumber(y), tonumber(z)))
+            WindUI:Notify({Title = "🚀 ТП на " .. text, Duration = 2})
+        else
+            WindUI:Notify({Title = "❌ Ошибка формата", Desc = "x, y, z", Duration = 2})
+        end
+    end
+})
+
+tpSection:Button({
+    Title = "TP to Shop",
+    Desc = "ТП к магазину аур (562.0, 445.7, -440.3)",
+    Callback = function()
+        tpTo(shopPos)
+        WindUI:Notify({Title = "🛒 ТП к магазину", Duration = 1})
+    end
+})
+
+tpSection:Space()
+
+local tpLoopSection = tpTab:Section({
+    Title = "🔄 Loop TP",
+})
+
+tpLoopSection:Toggle({
+    Title = "Constant TP",
+    Desc = "Постоянно телепортировать на сохранённую позицию",
+    Default = false,
+    Callback = function(v)
+        constantTpEnabled = v
+        if v then
+            local root = getRoot()
+            if root then
+                constantTpPos = root.Position
+            end
+            task.spawn(function()
+                while constantTpEnabled do
+                    if constantTpPos then
+                        tpTo(constantTpPos)
+                    end
+                    task.wait(0.1)
+                end
+            end)
+        end
+    end
+})
+
+tpLoopSection:Button({
+    Title = "Set Constant TP Pos",
+    Desc = "Задать позицию для постоянного ТП",
+    Callback = function()
+        local root = getRoot()
+        if root then
+            constantTpPos = root.Position
+            WindUI:Notify({Title = "✅ Constant TP позиция задана", Duration = 2})
+        end
+    end
+})
+
+tpLoopSection:Toggle({
+    Title = "TP on Respawn",
+    Desc = "Автоматически ТП на позицию после респавна",
+    Default = false,
+    Callback = function(v)
+        tpOnRespawn = v
+        if v then
+            local root = getRoot()
+            if root then
+                respawnTpPos = root.Position
+                WindUI:Notify({Title = "✅ Respawn TP позиция задана", Duration = 2})
+            end
+        end
+    end
+})
+
+-- Respawn handler
+player.CharacterAdded:Connect(function(char)
+    task.wait(1)
+    if tpOnRespawn and respawnTpPos then
+        local r = char:FindFirstChild("HumanoidRootPart")
+        if r then
+            r.CFrame = CFrame.new(respawnTpPos)
+        end
+    end
+end)
+
+-- ============================================
+-- TAB: PLAYER
+-- ============================================
+local plrTab = Window:Tab({
+    Title = "Player",
+    Icon = "user",
+})
+
+local plrSection = plrTab:Section({
+    Title = "⚡ Скорость и прыжок (Loop)",
+})
+
+plrSection:Toggle({
+    Title = "Loop WalkSpeed",
+    Desc = "Не сбрасывается при прыжке/двери/анимации (Heartbeat loop)",
+    Default = false,
+    Callback = function(v)
+        loopWsEnabled = v
+    end
+})
+
+plrSection:Slider({
+    Title = "WalkSpeed",
+    Desc = "Значение скорости (стандарт 16)",
+    Min = 16,
+    Max = 200,
+    Default = 50,
+    Round = 0,
+    Callback = function(v)
+        walkSpeedVal = v
+    end
+})
+
+plrSection:Toggle({
+    Title = "Loop JumpPower",
+    Desc = "Не сбрасывается (Heartbeat loop)",
+    Default = false,
+    Callback = function(v)
+        loopJpEnabled = v
+    end
+})
+
+plrSection:Slider({
+    Title = "JumpPower",
+    Desc = "Сила прыжка (стандарт 50)",
+    Min = 50,
+    Max = 300,
+    Default = 80,
+    Round = 0,
+    Callback = function(v)
+        jumpPowerVal = v
+    end
+})
+
+-- Heartbeat loop для WalkSpeed и JumpPower
+RunService.Heartbeat:Connect(function()
+    local hum = getHum()
+    if not hum then return end
+    if loopWsEnabled then
+        hum.WalkSpeed = walkSpeedVal
+    end
+    if loopJpEnabled then
+        hum.UseJumpPower = true
+        hum.JumpPower = jumpPowerVal
+    end
+end)
+
+-- ============================================
+-- TAB: AUTO BUY
+-- ============================================
+local buyTab = Window:Tab({
+    Title = "Auto Buy",
+    Icon = "shopping-cart",
+})
+
+local buyInfoSection = buyTab:Section({
+    Title = "🛒 Покупка аур",
+})
+
+buyInfoSection:Paragraph({
+    Title = "Координаты мыши",
+    Desc = "X: 954 | Y: 494 (фиксировано для кнопки покупки)",
+})
+
+buyInfoSection:Paragraph({
+    Title = "Позиция магазина",
+    Desc = "562.0, 445.7, -440.3",
+})
+
+buyInfoSection:Paragraph({
+    Title = "Стоимость ауры",
+    Desc = "500 конфет",
+})
+
+local buyControlSection = buyTab:Section({
+    Title = "⚙️ Управление покупкой",
+})
+
+buyControlSection:Toggle({
+    Title = "Auto Buy Auras",
+    Desc = "ТП к магазину → мышь на 954,494 → зажим ЛКМ → покупка",
+    Default = false,
+    Callback = function(v)
+        buyEnabled = v
+        if v then
+            task.spawn(buyLoop)
+            WindUI:Notify({Title = "🛒 Auto Buy ВКЛ", Duration = 2})
+        end
+    end
+})
+
+buyControlSection:Slider({
+    Title = "Hold Time (сек)",
+    Desc = "Сколько держать ЛКМ на кнопке покупки",
+    Min = 0.5,
+    Max = 5,
+    Default = 2,
+    Round = 1,
+    Callback = function(v)
+        buyHoldTime = v
+    end
+})
+
+buyControlSection:Slider({
+    Title = "Cooldown (сек)",
+    Desc = "Пауза между попытками покупки",
+    Min = 3,
+    Max = 30,
+    Default = 10,
+    Round = 0,
+    Callback = function(v)
+        buyCooldown = v
+    end
+})
+
+buyControlSection:Toggle({
+    Title = "Lock Camera on Buy",
+    Desc = "Фиксировать камеру при покупке (чтобы мышь не уехала)",
+    Default = false,
+    Callback = function(v)
+        buyLockCamera = v
+    end
+})
+
+buyControlSection:Button({
+    Title = "Buy Once Now",
+    Desc = "Купить одну ауру прямо сейчас (тест)",
+    Callback = function()
+        task.spawn(tryBuyAura)
+    end
+})
+
+-- ============================================
+-- TAB: EXTRAS
+-- ============================================
+local extTab = Window:Tab({
+    Title = "Extras",
+    Icon = "settings",
+})
+
+local extSection = extTab:Section({
+    Title = "🔧 Дополнительно",
+})
+
+extSection:Toggle({
+    Title = "Noclip",
+    Desc = "Проходить сквозь стены и объекты",
+    Default = false,
+    Callback = function(v)
+        noclipEnabled = v
+    end
+})
+
+-- Noclip loop
+RunService.Stepped:Connect(function()
+    if noclipEnabled then
+        local c = getChar()
+        if c then
+            for _, p in c:GetDescendants() do
+                if p:IsA("BasePart") then
+                    p.CanCollide = false
+                end
+            end
+        end
+    end
+end)
+
+extSection:Toggle({
+    Title = "Anti-AFK",
+    Desc = "Не кикает за AFK (VirtualUser)",
+    Default = true,
+    Callback = function(v)
+        if v then
+            local vu = game:GetService("VirtualUser")
+            player.Idled:Connect(function()
+                vu:Button2Down(Vector2.new(0, 0), camera.CFrame)
+                task.wait(1)
+                vu:Button2Up(Vector2.new(0, 0), camera.CFrame)
+            end)
+            WindUI:Notify({Title = "✅ Anti-AFK включён", Duration = 2})
+        end
+    end
+})
+
+extSection:Button({
+    Title = "Server Hop",
+    Desc = "Перейти на другой публичный сервер",
+    Callback = function()
+        pcall(function()
+            local servers = HttpService:JSONDecode(
+                game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100")
+            )
+            for _, s in servers.data do
+                if s.playing < s.maxPlayers and s.id ~= game.JobId then
+                    TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id)
+                    return
+                end
+            end
+            WindUI:Notify({Title = "⚠️ Нет свободных серверов", Duration = 2})
+        end)
+    end
+})
+
+extSection:Button({
+    Title = "Rejoin",
+    Desc = "Перезайти на этот же сервер",
+    Callback = function()
+        pcall(function()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId)
+        end)
+    end
+})
+
+extSection:Space()
+
+local espSection = extTab:Section({
+    Title = "👁️ ESP (Highlight)",
+})
+
+extSection:Toggle({
+    Title = "ESP Zombies",
+    Desc = "Подсветка зомби в workspace.Live",
+    Default = false,
+    Callback = function(v)
+        local live = workspace:FindFirstChild("Live")
+        if not live then return end
+        if v then
+            for _, model in live:GetChildren() do
+                if model:IsA("Model") and model:FindFirstChildOfClass("Humanoid") then
+                    if not model:FindFirstChild("ESP_Highlight") then
+                        local hl = Instance.new("Highlight")
+                        hl.Name = "ESP_Highlight"
+                        hl.FillColor = Color3.fromRGB(255, 0, 0)
+                        hl.OutlineColor = Color3.fromRGB(255, 255, 0)
+                        hl.FillTransparency = 0.7
+                        hl.Parent = model
+                    end
+                end
+            end
+        else
+            for _, model in live:GetChildren() do
+                local hl = model:FindFirstChild("ESP_Highlight")
+                if hl then hl:Destroy() end
+            end
+        end
+    end
+})
+
+-- ============================================
+-- TAB: CONFIG
+-- ============================================
+local cfgTab = Window:Tab({
+    Title = "Config",
+    Icon = "save",
+})
+
+local cfgSection = cfgTab:Section({
+    Title = "💾 Конфигурация",
+})
+
+pcall(function()
+    local cm = Window.ConfigManager
+    if cm then
+        cfgSection:Button({
+            Title = "Save Config",
+            Desc = "Сохранить все настройки",
+            Callback = function()
+                pcall(function() cm:Save("halloween_v4") end)
+                WindUI:Notify({Title = "✅ Конфиг сохранён", Duration = 2})
+            end
+        })
+        cfgSection:Button({
+            Title = "Load Config",
+            Desc = "Загрузить сохранённые настройки",
+            Callback = function()
+                pcall(function() cm:Load("halloween_v4") end)
+                WindUI:Notify({Title = "✅ Конфиг загружен", Duration = 2})
+            end
+        })
+        cfgSection:Button({
+            Title = "Delete Config",
+            Desc = "Удалить сохранённый конфиг",
+            Callback = function()
+                pcall(function() cm:Delete("halloween_v4") end)
+                WindUI:Notify({Title = "🗑️ Конфиг удалён", Duration = 2})
+            end
+        })
+    end
+end)
+
+-- ============================================
+-- UI UPDATE LOOP (статистика)
+-- ============================================
+task.spawn(function()
+    while true do
+        local elapsed = tick() - sessionStart
+        stats.totalTime = (stats.totalTime or 0) + 0.5
+
+        -- Сохраняем каждые 10 секунд
+        if math.floor(elapsed) % 10 == 0 then
+            saveData()
+        end
+
+        local t = math.floor(elapsed)
+        local h = math.floor(t / 3600)
+        local m = math.floor((t % 3600) / 60)
+        local s = t % 60
+
+        pcall(function()
+            statAllTime:SetDesc(string.format(
+                "⏱ %ds | 🍬 %d | 💀 %d | 🚪 %d | ✨ %d | 🚀 %d",
+                stats.totalTime or 0,
+                stats.totalCandy or 0,
+                stats.totalKills or 0,
+                stats.totalDoors or 0,
+                stats.totalAuras or 0,
+                stats.launches or 0
+            ))
+
+            statSession:SetDesc(string.format(
+                "⏱ %02d:%02d:%02d | 🍬 %d | 💀 %d | 🚪 %d | ✨ %d",
+                h, m, s,
+                sessionCandy,
+                sessionKills,
+                sessionDoors,
+                sessionAuras
+            ))
+
+            botCountPara:SetDesc(string.format(
+                "💀 %d убито | 🎲 Следующий ролл через: %d киллов",
+                botKillCount,
+                rollEveryKills - (botKillCount % rollEveryKills)
+            ))
+
+            if botKillEnabled then
+                botStatusPara:SetDesc("🟢 Активен | Позиция: " ..
+                    (botKillPos and string.format("%.0f, %.0f, %.0f", botKillPos.X, botKillPos.Y, botKillPos.Z) or "нет"))
+            else
+                botStatusPara:SetDesc("⏸ Остановлен")
+            end
+        end)
+
+        task.wait(0.5)
+    end
+end)
+
+-- ============================================
+-- STARTUP
+-- ============================================
+WindUI:Notify({
+    Title = "🎃 Halloween Farm Hub v4 FULL",
+    Desc = "Farm + Kill + Buy + Bot Kill + Roll Emotes загружен!",
+    Duration = 5,
+})
+
+print("✅ Halloween Farm Hub v4 FULL loaded")
+print("   🍬 Auto Farm: вкладка Auto Farm")
+print("   🗡️ Zombie Kill: вкладка Auto Farm")
+print("   🤖 Bot Kill: вкладка Bot Kill")
+print("   🎲 Roll Emotes: вкладка Bot Kill → секция Roll")
+print("   🛒 Auto Buy: вкладка Auto Buy")
+print("   📍 Teleport: вкладка Teleport")
+print("   ⚡ Player: вкладка Player")
+print("   🔧 Extras: вкладка Extras")
